@@ -1,0 +1,473 @@
+---
+title: "Indian Liver Patient Record Project"
+author: "Alejandro Jiménez"
+date: "May 25, 2020"
+output: pdf_document
+---
+
+# Introduction
+
+Every day each it’s vital to identify early a disease, this could significate the survival of a patient. Thanks to medical exams, the doctor can analyze various factor and determine if a patient has a risk of a disease. In order to attempt helping the doctors to make a faster analysis, there can be a data analysis to create a model that can predict a certain disease and help doctor to make a quicker treatment.
+
+This work analyze the “Indian Liver Patient Records” extracted from Kaggle to attempt building an algorithm that helps determine if a patient has a liver disease with a good accuracy. The methods used in the analysis were: K-means, logistic regression, LDA, QDA, Loess, kNN, Random Forest and ensemble all this methods. This methods were used first not considering gender and later consider gender to see if there was improvement in the accuracy. Finally there was an analysis with a neural network to see if there was a better result than the other methods. 
+
+## Data Preparation
+
+As mentioned before this data was extracted from Kaggle. The file (cvs format) was previously downloaded in a .zip file and extracted. The next code shows the packages used in the process and the data stored in the “patients” variable. 
+
+```{r data_load, echo = TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+#Install packages (if necessary) and load them
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(matrixStats)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(neuralnet)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+#Indian Liver Patient Records dataset:
+  # https://www.kaggle.com/uciml/indian-liver-patient-records?select=indian_liver_patient.csv
+  # Data previously downloaded in a .zip file and extract the dataset.
+
+#Inspecting the file, it seems that it have column names.
+#.csv files, .R and .Rmd must be treated as a R project to load correctly the files
+#Load dataset
+patients <- read_csv("indian_liver_patient.csv")
+
+```
+
+Inspecting the data we see there are eleven variables, ten being numeric and Gender a character: 
+
+```{r names, echo = FALSE, message = FALSE, warning = FALSE}
+
+#See class of the variables
+sapply(patients,class)
+  
+```
+
+Observing the classes and variables, we rearrange the order of the data to put the “Dataset” in the first column since this is our outcome and change its name to “Liver” for easier recognition. Then change the class of “Liver” and “Gender” into factor and finally change NA’s into zeros. We see our data in the next format after this changes:
+
+```{r names_new, echo = FALSE, message = FALSE, warning = FALSE}
+
+#Change Dataset into the fist column, change name into liver and make it a factor class.
+#Change Gender to second column
+patients <- patients[,c(11,1:10)]
+patients <- patients[,c(1,3,c(2,4:11))]
+patients <- patients %>% mutate(Dataset=as.factor(Dataset)) %>% rename(Liver=Dataset)
+
+#change gender into factors class
+patients <- patients %>% mutate(Gender=as.factor((Gender)))
+
+#Check if there are missing values
+apply(is.na(patients), 2, which)
+
+#Change missing missing NA into 0
+patients <- patients %>% mutate_all(~replace(., is.na(.), 0))
+
+#See class of the variables
+sapply(patients,class)
+  
+```
+
+# Data Analysis
+
+##Data Exploration
+First we identify with value in “Liver” indicates a disease:
+
+```{r identify_liver, echo = FALSE, message = FALSE, warning = FALSE}
+
+#Identify which value in liver indicates a desease
+summary(patients$Liver)
+  
+```
+
+According to the page, there are 416 patients with liver disease. Factor 1 corresponds to having liver disease and 2 patients who don’t. Then we see the distribution of patients through age with liver disease and gender distinction. We observe that there’s no a clear difference of patients with and without disease by their age.
+
+```{r age_liver, echo = FALSE, message = FALSE, warning = FALSE}
+
+#Age vs liver boxplot with gender distinction
+patients %>% ggplot(aes(Liver,Age,fill=Gender))+
+  geom_boxplot() + ggtitle("Liver vs Age Boxplot")
+  
+```
+
+Then we examine proportion of patients with disease by gender. The bar plot and the proportions doesn’t significant difference that gender is a factor for liver disease. 
+
+```{r gender_liver, echo = FALSE, message = FALSE, warning = FALSE}
+
+#Gender Barplot with liver distiction
+patients %>% group_by(Gender) %>% ggplot(aes(Gender,fill=Liver))+
+  geom_bar() + ylab("Count")+ggtitle("Barplot of Gender with Disease Distiction")
+
+#Proportion of Liver by Gender
+patients %>% group_by(Gender) %>% summarise(Disease=mean(Liver==1),Not_Disease = mean(Liver==2))
+  
+```
+
+The next plot show the relation of Total and Direct Bilirubin. We observe there’s a positive correlation between this variables. We also observe a major concentration of values in the left bottom size, including the values of people with no liver disease, there’s no clear distinction between patients with and without disease in this graph.
+
+```{r bilirubin_liver, echo = FALSE, message = FALSE, warning = FALSE}
+
+#Direct vs Total Bilirubin with liver distiction
+patients %>% ggplot(aes(Total_Bilirubin,Direct_Bilirubin,color=Liver))+
+  geom_rug()+geom_point() +
+  xlab("Total Bilirubin") + ylab("Direct Bilirubin")+
+  ggtitle("Total vs Direct Bilirubin")
+  
+```
+
+Next we observe a heat map of the relation between variables, to do this first we exclude the gender feature since it’s a class variable and in the previous plots we observe there’s no significant difference between male and female patients. First we scale the features and obtain the distance, the next plot show a heat map of this relation between variables.
+
+```{r heatmap, echo = FALSE,  message = FALSE, warning = FALSE}
+
+#Scale features
+x <- as.matrix(patients[,3:11])
+x_scaled <- sweep(sweep(x,2,colMeans(x)),
+                  2, colSds(x),FUN="/")
+#Heatmap of features
+d_features <- dist(t(x_scaled))
+heatmap(as.matrix(d_features),labRow = NA, labCol = NA)
+  
+```
+
+We observe that there’s some correlation between some variables, but this aren’t too strong to discard more features in our model.  Then we run a Principal Component Analysis (PCA) to observe if some variables will help distinguish the liver condition.  The next plot show the histogram all the features; we observe there’s an issue with our data. Although some variable have major contribution, there’s no clear distinction of patients with and without liver disease. The interquartile range of liver free disease falls into the interquartile range of patients with disease. This suspect that our fitting models won’t have a good accuracy. 
+
+```{r pca, echo = FALSE,  message = FALSE, warning = FALSE}
+
+#Principal Component Analysis
+pca <- prcomp(x_scaled)
+#Boxplot
+data.frame(type = patients$Liver ,pca$x) %>%
+  gather(key = "PC",value="value", -type) %>% 
+  ggplot(aes(PC,value,fill = type)) + geom_boxplot()
+  
+```
+
+## Analysis without Gender
+
+```{r test_train, echo = FALSE,  message = FALSE, warning = FALSE}
+
+# Creating data partition
+set.seed(1,sample.kind = "Rounding")
+test_index <- createDataPartition(patients$Liver, time=1, p=0.15,list=FALSE)
+test_x <- x_scaled[test_index,]
+test_y <- patients$Liver[test_index]
+train_x <- x_scaled[-test_index,]
+train_y <- patients$Liver[-test_index]
+  
+```
+
+To run our analysis we split our data into test and train datasets. The proportion of the test dataset it 15% since we can’t to train our models with the more data as possible since there are only 583 observations.  After getting our datasets we start our analysis, we train our models and then obtain our prediction of the test dataset. Then with the confusion matrix we extract the accuracy, sensitivity, specificity and balanced accuracy. The balanced accuracy is our value of interest since this is a binary classification.  All result are stored in and show in ta table to compare our models. 
+
+The first one is with the k-means method. To obtain our predations we define the next function: 
+
+```{r kmeans_predict, echo = TRUE , message = FALSE, warning = FALSE}
+
+#Define Fuction to predict with K-means
+predict_kmeans <- function(k, x){
+  centers <- k$centers
+  n_centers <- nrow(centers)
+  dist_mat <- as.matrix(dist(rbind(centers, x)))
+  dist_mat <- dist_mat[-seq(n_centers), seq(n_centers)]
+  max.col(-dist_mat)
+}
+  
+```
+
+The methods used are: K-mean, logistic regression, LDA, QDA, Loess, kNN, Random Forest and ensemble this methods. For simplicity the results of all the analysis are shown the next table. For the ensemble method, is defined by the means of the predictions. If the mean is more than 0.5 then its prediction is 1, otherwise is 2. 
+The next table show a low balance accuracy, the majority of the methods have a low specificity and the best prediction is given by QDA. In the result section we discuss more the values obtained.
+
+```{r methods, echo = FALSE,  message = FALSE, warning = FALSE}
+
+# K-means Clustering
+set.seed(1,sample.kind = "Rounding")
+k <- kmeans(train_x, centers = 2)
+#Predict values
+kmeans_pred <- predict_kmeans(k,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=as.factor(kmeans_pred),reference=test_y)
+results <- data.frame(Method = "K-Means",
+                      Accuracy = cm$overall["Accuracy"],
+                      Sensitivity=cm$byClass["Sensitivity"],
+                      Specificity=cm$byClass["Specificity"],
+                      Balanced_Accuracy= cm$byClass["Balanced Accuracy"])
+
+#Logistic Regression
+train_glm <- train(train_x,train_y,method="glm")
+glm_pred <- predict(train_glm,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=glm_pred,reference=test_y)
+results <- bind_rows(results,data.frame(Method = "Logistic Regression (glm)",
+                      Accuracy = cm$overall["Accuracy"],
+                      Sensitivity=cm$byClass["Sensitivity"],
+                      Specificity=cm$byClass["Specificity"],
+                      Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#LDA
+train_lda <- train(train_x,train_y,method="lda")
+lda_pred <- predict(train_lda,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=lda_pred,reference=test_y)
+results <- bind_rows(results,data.frame(Method = "LDA",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#QDA
+train_qda <- train(train_x,train_y,method="qda")
+qda_pred <- predict(train_qda,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=qda_pred,reference=test_y)
+results <- bind_rows(results,data.frame(Method = "QDA",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#Loess
+set.seed(1, sample.kind = "Rounding")
+train_loess <- train(train_x,train_y,method="gamLoess")
+loess_pred <- predict(train_loess,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=loess_pred,reference=test_y)
+results <- bind_rows(results,data.frame(Method = "Loess",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#kNN
+set.seed(1, sample.kind = "Rounding")
+tuning <- data.frame(k=seq(3,21,2))
+train_knn <- train(train_x,train_y,method="knn",tuneGrid = tuning)
+knn_pred <- predict(train_knn,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=knn_pred,reference=test_y)
+results <- bind_rows(results,data.frame(Method = "kNN",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+# Random Forest
+set.seed(1, sample.kind = "Rounding")
+tuning <- data.frame(mtry=c(3,5,7,9))
+train_rf <- train(train_x,train_y, method="rf",tuneGrid = tuning, importance = TRUE)
+rf_pred <- predict(train_rf, test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=rf_pred,reference=test_y)
+results <- bind_rows(results,data.frame(Method = "Random Forest (rf)",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#Ensemble 
+ensemble <- cbind(glm=glm_pred==1,lda=lda_pred==1,qda=qda_pred==1,loess=loess_pred==1,
+                  rf=rf_pred==1,knn=knn_pred==1,kmeans=kmeans_pred==1)
+ensemble_pred <- ifelse(rowMeans(ensemble) >0.5,1,2)
+cm <- confusionMatrix(data=as.factor(ensemble_pred),reference=test_y)
+#Show Results of Accuracy, Sensitivity and Specificity
+results <- bind_rows(results,data.frame(Method = "Ensemble",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+results %>% knitr::kable()
+  
+```
+
+## Analysis with Gender
+
+Even though we discard the gender feature, in this section it is incorporated due to the low balanced accuracies obtained in the last methods in attempt to improve it. To incorporate a classification variable, we define males to be -1 and female 1. The next table show the results with Genre and observe there’s no improvement, actually in some methods like LDA give a worst balanced accuracy. 
+
+```{r methods_genre, echo = FALSE,  message = FALSE, warning = FALSE}
+
+#Add numeric value to gender
+patients <- patients %>% mutate(num_gender = 0)
+patients$num_gender[which(patients$Gender=="Female")] <- 1
+patients$num_gender[which(patients$Gender=="Male")] <- -1
+
+#Scale features
+x <- as.matrix(patients[,3:12])
+x_scaled <- sweep(sweep(x,2,colMeans(x)),
+                  2, colSds(x),FUN="/")
+
+# Creating data partition
+set.seed(1,sample.kind = "Rounding")
+test_index <- createDataPartition(patients$Liver, time=1, p=0.15,list=FALSE)
+test_x <- x_scaled[test_index,]
+test_y <- patients$Liver[test_index]
+train_x <- x_scaled[-test_index,]
+train_y <- patients$Liver[-test_index]
+
+# K-means Clustering
+
+set.seed(1,sample.kind = "Rounding")
+k <- kmeans(train_x, centers = 2)
+#Predict values
+kmeans_pred <- predict_kmeans(k,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=as.factor(kmeans_pred),reference=test_y)
+results_g <- data.frame(Method_Gender = "K-Means",
+                      Accuracy = cm$overall["Accuracy"],
+                      Sensitivity=cm$byClass["Sensitivity"],
+                      Specificity=cm$byClass["Specificity"],
+                      Balanced_Accuracy= cm$byClass["Balanced Accuracy"])
+
+#Logistic Regression
+train_glm <- train(train_x,train_y,method="glm")
+glm_pred <- predict(train_glm,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=glm_pred,reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "Logistic Regression (glm)",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#LDA
+train_lda <- train(train_x,train_y,method="lda")
+lda_pred <- predict(train_lda,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=lda_pred,reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "LDA",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#QDA
+train_qda <- train(train_x,train_y,method="qda")
+qda_pred <- predict(train_qda,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=qda_pred,reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "QDA",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#Loess
+set.seed(1, sample.kind = "Rounding")
+train_loess <- train(train_x,train_y,method="gamLoess")
+loess_pred <- predict(train_loess,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=loess_pred,reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "Loess",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#kNN
+set.seed(1, sample.kind = "Rounding")
+tuning <- data.frame(k=seq(3,21,2))
+train_knn <- train(train_x,train_y,method="knn",tuneGrid = tuning)
+knn_pred <- predict(train_knn,test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=knn_pred,reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "kNN",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+# Random Forest
+set.seed(1, sample.kind = "Rounding")
+tuning <- data.frame(mtry=c(3,5,7,9))
+train_rf <- train(train_x,train_y, method="rf",tuneGrid = tuning, importance = TRUE)
+rf_pred <- predict(train_rf, test_x)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=rf_pred,reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "Random Forest (rf)",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+#Ensemble 
+ensemble <- cbind(glm=glm_pred==1,lda=lda_pred==1,qda=qda_pred==1,loess=loess_pred==1,
+                  rf=rf_pred==1,knn=knn_pred==1,kmeans=kmeans_pred==1)
+ensemble_pred <- ifelse(rowMeans(ensemble) >0.5,1,2)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=as.factor(ensemble_pred),reference=test_y)
+results_g <- bind_rows(results_g,data.frame(Method_Gender = "Ensemble",
+                                        Accuracy = cm$overall["Accuracy"],
+                                        Sensitivity=cm$byClass["Sensitivity"],
+                                        Specificity=cm$byClass["Specificity"],
+                                        Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+results_g %>% knitr::kable()
+  
+```
+
+## Neural Network
+
+Neural Networks are a strong tool for predictions, we use the “neuralnet” package for this analysis. First we bind our Liver data with the scaled features into a data frame. Change the class of liver into numeric and for a simpler neural network change the value of 2 into 0 in the liver. This to have a single neuron as output. We make the same data partition like the other method into a test and train set. The neural net is constructed with 2 hidden layer with 10 and 5 neurons respectively. 
+
+```{r neural_definition, echo = TRUE,  message = FALSE, warning = FALSE}
+
+#Bind x_scaled with patients$liver in a dataframe
+patients_nn <- cbind(patients$Liver,as.data.frame(x_scaled))
+patients_nn <- patients_nn %>% rename(Liver=`patients$Liver`)
+
+#Change values of liver into binary and numeric
+patients_nn <- patients_nn %>% mutate(Liver=as.numeric(Liver))
+patients_nn$Liver[which(patients_nn$Liver==2)] <- 0
+
+# Creating data partition
+set.seed(1,sample.kind = "Rounding")
+test_index <- createDataPartition(patients_nn$Liver, time=1, p=0.15,list=FALSE)
+test <- as.data.frame(patients_nn[test_index,])
+train <- as.data.frame(patients_nn[-test_index,])
+
+#Neural Network method
+nn <- neuralnet(Liver~Age+Total_Bilirubin+Direct_Bilirubin+Alkaline_Phosphotase+
+               Alamine_Aminotransferase+Aspartate_Aminotransferase+
+               Total_Protiens+Albumin+
+               Albumin_and_Globulin_Ratio+num_gender,
+               data=train, hidden=c(10,5),act.fct = "logistic",linear.output = FALSE)
+  
+```
+
+Finally we make prediction with the neural network and stored in the table of methods without genre for comparison. The next code show this process.
+
+```{r neural_pred, echo = TRUE,  message = FALSE, warning = FALSE}
+
+#Predict Values with Neural Netwokr
+nn_pred <- compute(nn,test[,2:11])
+nn_pred <- ifelse(nn_pred$net.result<0.5,1,0)
+#Show Results of Accuracy, Sensitivity and Specificity
+cm <- confusionMatrix(data=as.factor(nn_pred),reference=as.factor(test[,1]))
+results <- bind_rows(results,data.frame(Method = "Neural Network",
+                                            Accuracy = cm$overall["Accuracy"],
+                                            Sensitivity=cm$byClass["Sensitivity"],
+                                            Specificity=cm$byClass["Specificity"],
+                                            Balanced_Accuracy= cm$byClass["Balanced Accuracy"]))
+
+```
+
+# Results
+
+These are the results the three methods used in the analysis. In the first table whe observe the neural network results:
+
+```{r result, echo = FALSE,  message = FALSE, warning = FALSE}
+
+results %>% knitr::kable()
+results_g %>% knitr::kable()
+  
+```
+
+We observe that the neural network gives the worst prediction with a balanced accuracy of 0.3827292, this implies that our constructed neural network it wrong or this isn’t the right approach for this analysis. The best balanced accuracy and specificity are from QDA this indicates that each class are normally distributed and it is corroborated with LDA which gives a sensitivity of one. We observe than genre isn’t really a factor that helps improve our predictions since it gives the same results in the methods with higher balanced accuracy.  The higher accuracy is given by the ensemble of the methods, with a value of 0.7303371, this isn’t high enough to declare a good prediction and we can ignore the balanced accuracy since we have more data of patients with liver disease. 
+
+# Conclusion
+
+We can declare that this methods aren’t the right approach since the data of patients with and without liver disease are too similar. There’s no clear distinction between the outcomes, so this methods can correctly identify results. The results of the algorithms applied can’t be considered to be implemented in practical situations since its accuracy is too low. 
+
+The next thing to do is to explore more deeply linear regression analysis since the results given by QDA and LDA indicates that the class have a normal distribution and this could help improve the predictions. Another thing to help improve the accuracy could be collect more data or add more features than can help distinguish the differences between patients with and without liver disease. 
+
+
+
+
+
+
+
